@@ -1,0 +1,14 @@
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -648,9 +648,8 @@
+ 				int w1, w2;
+ 				vm_offset_t ch = chb + (pa & 0x3fffu);
+ 				uint32_t s0;
+-				touch_gpio(72, 0, 0, 0, true, false);   /* switch low */
+-				touch_gpio(8, 0, 0, 0, true, false);    /* chip held in reset while powering */
+-				printf("SWEET PIXEL: gpio4 step1 chan pa=%#x va=%#llx\n", pa, (unsigned long long)ch);
++				printf("SWEET PIXEL: gpio4 step0 checks ok\n");
++				printf("SWEET PIXEL: gpio4 step1 chan pa=%#x va.lo=%#x\n", pa, (unsigned)(ch & 0xffffffffu));
+ 				s0 = touch_rd(ch, 0x08u);
+ 				printf("SWEET PIXEL: gpio4 step2 chan status read=%#x\n", s0);
+ 				w1 = touch_px_write(ch, 0x44, 0x80);    /* source 0, inverted = high */
