@@ -1,0 +1,114 @@
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -706,6 +706,103 @@
+ 	printf("SWEET PIXEL: touch diagnostic done\n");
+ }
+ 
++/* Pixel 4a: ST FTM5 on I2C 0x49 (protocol from the sunfish fts_touch driver). */
++#define PX_ADDR      0x49u
++#define PX_FIFO_CMD  0x86u
++#define PX_EVT_SIZE  8u
++
++static void
++touch_px_log(const char *tag, const uint8_t *e)
++{
++	printf("SWEET PIXEL: %s %02x %02x %02x %02x %02x %02x %02x %02x\n", tag,
++		e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7]);
++}
++
++static void
++touch_px_run(void)
++{
++	uint8_t ev[PX_EVT_SIZE];
++	int px[TOUCH_MAX] = {0}, py[TOUCH_MAX] = {0};
++	uint32_t mask = 0;
++	unsigned logged = 0, errors = 0;
++	int scan = 0xff, err;
++	bool ready = false;
++
++	(void)PE_parse_boot_argn("sweetpxscan", &scan, sizeof(scan));
++	printf("SWEET PIXEL: driver start, scan setting %#x\n", scan);
++
++	/* Reset the chip, then wait for the controller-ready event (0x03). */
++	touch_gpio(8, 0, 0, 0, true, false);
++	touch_wait(10);
++	touch_gpio(8, 0, 0, 0, true, true);
++	for (unsigned i = 0; i < 400 && !ready && !st.dead; ++i) {
++		err = touch_read(PX_ADDR, PX_FIFO_CMD, false, ev, PX_EVT_SIZE);
++		if (err || ev[0] == 0x00 || ev[0] == 0xff) {
++			touch_wait(5);
++			continue;
++		}
++		touch_px_log("boot event", ev);
++		if (ev[0] == 0x03) {
++			ready = true;
++		}
++	}
++	printf("SWEET PIXEL: controller ready=%d dead=%d\n", ready, st.dead);
++	if (st.dead) {
++		return;
++	}
++
++	/* Scan mode: A0 <active> <settings>, as setScanMode(SCAN_MODE_ACTIVE, ...). */
++	uint8_t cmd[3] = {0xa0, 0x00, (uint8_t)scan};
++	err = touch_msg(PX_ADDR, cmd, sizeof(cmd), NULL, 0, false);
++	printf("SWEET PIXEL: scan mode write err=%d\n", err);
++	touch_wait(20);
++
++	while (!st.dead) {
++		unsigned n = 0;
++		while (n < 32) {
++			err = touch_read(PX_ADDR, PX_FIFO_CMD, false, ev, PX_EVT_SIZE);
++			if (err) {
++				if ((errors++ % 200u) == 0) {
++					printf("SWEET PIXEL: fifo read err=%d count=%u\n", err, errors);
++				}
++				if (errors == 50 && mask) {
++					mask = 0;
++					touch_report(0, px, py);
++				}
++				break;
++			}
++			errors = 0;
++			if (ev[0] == 0x00 || ev[0] == 0xff) {
++				break;
++			}
++			++n;
++			if (logged < 60) {
++				touch_px_log("event", ev);
++				++logged;
++			}
++			unsigned id = ev[1] >> 4, type = ev[1] & 0x0fu;
++			if (ev[0] == 0x13 || ev[0] == 0x23) {
++				if (id >= TOUCH_MAX || type == 0 || type > 4) {
++					continue;
++				}
++				int x = (int)(((unsigned)(ev[3] & 0x0fu) << 8) | ev[2]);
++				int y = (int)(((unsigned)ev[4] << 4) | (ev[3] >> 4));
++				px[id] = x > 1079 ? 1079 : x;
++				py[id] = y > 2339 ? 2339 : y;
++				mask |= 1u << id;
++				touch_report(mask, px, py);
++			} else if (ev[0] == 0x33) {
++				if (id < TOUCH_MAX && (mask & (1u << id))) {
++					mask &= ~(1u << id);
++					touch_report(mask, px, py);
++				}
++			}
++		}
++		touch_wait(n ? 2 : 10);
++	}
++	touch_report(0, px, py);
++}
++
+ static void
+ touch_thread(void *arg, wait_result_t result)
+ {
+@@ -732,6 +829,7 @@
+ 	}
+ 	if (touch_pixel) {
+ 		touch_pixel_probe();
++		touch_px_run();
+ 		goto out;
+ 	}
+ 	printf("SWEET TOUCH: TLMM reset=%#x irq=%#x vdd90=%#x; voting L11C through RPMh\n",
