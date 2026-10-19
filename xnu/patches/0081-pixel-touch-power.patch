@@ -1,0 +1,82 @@
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -574,6 +574,22 @@
+ 		touch_rd(st.gpio, TOUCH_GPIO_IO(6)) & 1u, touch_rd(st.gpio, TOUCH_GPIO_IO(7)) & 1u,
+ 		touch_rd(st.gpio, TOUCH_GPIO_IO(8)) & 1u, touch_rd(st.gpio, TOUCH_GPIO_IO(9)) & 1u,
+ 		touch_rd(st.gpio, TOUCH_GPIO_IO(72)) & 1u);
++}
++
++/* PMIC arbiter channel write (apps EE0 channel): EXT_WRITEL, one byte. */
++static int
++touch_px_write(vm_offset_t ch, unsigned addr, uint8_t val)
++{
++	touch_wr(ch, 0x10u, val);                       /* WDATA0 */
++	touch_wr(ch, 0, (addr & 0xffu) << 4);           /* opcode 0, 1 byte */
++	for (unsigned i = 0; i < 1000; ++i) {
++		uint32_t status = touch_rd(ch, 0x08u);
++		if (status & 1u) {
++			return (status & 0x0eu) ? -1 : 0;
++		}
++		delay(1);
++	}
++	return -2;
+ }
+ 
+ static void
+@@ -615,6 +631,35 @@
+ 			int r = touch_px_read(obs, apid, regs[i], &v);
+ 			printf("SWEET PIXEL: pm6150 gpio4 reg %#x = %#x (rc=%d)\n", regs[i], v, r);
+ 		}
++		if (apid >= 0 && owner == 0) {
++			unsigned pa = 0x0c600000u + 0x80u * (unsigned)apid;     /* chnls, EE0 */
++			vm_offset_t chb = ml_io_map(pa & ~0x3fffu, 0x4000);
++			uint8_t type = 0xee, sub = 0xee, mode = 0xee, src = 0xee, en = 0xee, val = 0xee;
++			int rc;
++
++			rc = touch_px_read(obs, apid, 0xc304, &type);
++			rc |= touch_px_read(obs, apid, 0xc305, &sub);
++			rc |= touch_px_read(obs, apid, 0xc340, &mode);
++			rc |= touch_px_read(obs, apid, 0xc344, &src);
++			rc |= touch_px_read(obs, apid, 0xc346, &en);
++			printf("SWEET PIXEL: gpio4 pre type=%#x sub=%#x mode=%#x src=%#x en=%#x rc=%d chan=%d\n",
++				type, sub, mode, src, en, rc, chb != 0);
++			if (chb && !rc && type == 0x10 && sub == 0x11 && mode == 0 && en == 0x80) {
++				int w1, w2;
++				touch_gpio(72, 0, 0, 0, true, false);   /* switch low */
++				touch_gpio(8, 0, 0, 0, true, false);    /* chip held in reset while powering */
++				w1 = touch_px_write(chb + (pa & 0x3fffu), 0x44, 0x80);  /* source 0, inverted = high */
++				w2 = touch_px_write(chb + (pa & 0x3fffu), 0x40, 0x02);  /* output enable */
++				touch_wait(30);
++				rc = touch_px_read(obs, apid, 0xc340, &mode);
++				rc |= touch_px_read(obs, apid, 0xc344, &src);
++				rc |= touch_px_read(obs, apid, 0xc308, &val);
++				printf("SWEET PIXEL: gpio4 power w1=%d w2=%d mode=%#x src=%#x status=%#x rc=%d\n",
++					w1, w2, mode, src, val, rc);
++			} else {
++				printf("SWEET PIXEL: gpio4 write skipped (checks failed)\n");
++			}
++		}
+ 	} else {
+ 		printf("SWEET PIXEL: SPMI mapping failed\n");
+ 	}
+@@ -638,6 +683,20 @@
+ 	printf("SWEET PIXEL: control 0x6e err=%d byte=%#x seen=%#x dead=%d\n", e, b, st.irq_status, st.dead);
+ 	st.probing = false;
+ 	touch_px_levels("after probe");
++	/* Second round: same chip, internal pull-ups on SCL/SDA. */
++	touch_gpio(6, 1, 3, 0, false, false);
++	touch_gpio(7, 1, 3, 0, false, false);
++	touch_wait(5);
++	touch_px_levels("pullup");
++	st.probing = true;
++	b = 0xa5;
++	e = touch_read(0x49, 0x00, false, &b, 1);
++	printf("SWEET PIXEL: probe2 0x49 err=%d byte=%#x seen=%#x dead=%d\n", e, b, st.irq_status, st.dead);
++	b = 0xa5;
++	e = touch_read(0x6e, 0x00, false, &b, 1);
++	printf("SWEET PIXEL: control2 0x6e err=%d byte=%#x seen=%#x dead=%d\n", e, b, st.irq_status, st.dead);
++	st.probing = false;
++	touch_px_levels("after probe2");
+ 	printf("SWEET PIXEL: touch diagnostic done\n");
+ }
+ 
