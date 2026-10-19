@@ -1,0 +1,124 @@
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -545,6 +545,102 @@
+ 	return true;
+ }
+ 
++/* Pixel 4a (sunfish): ST FTS on SE7 I2C 0x49. Diagnostics only, NO PMIC writes. */
++static int touch_pixel;
++
++static int
++touch_px_read(vm_offset_t obs, int apid, unsigned addr, uint8_t *out)
++{
++	uint32_t off = 0x80u * (unsigned)apid;
++	touch_wr(obs, off, (1u << 27) | ((addr & 0xffu) << 4));
++	for (unsigned i = 0; i < 1000; ++i) {
++		uint32_t status = touch_rd(obs, off + 0x08u);
++		if (status & 1u) {
++			if (status & 0x0eu) {
++				return -1;
++			}
++			*out = (uint8_t)touch_rd(obs, off + 0x18u);
++			return 0;
++		}
++		delay(1);
++	}
++	return -2;
++}
++
++static void
++touch_px_levels(const char *tag)
++{
++	printf("SWEET PIXEL: %s pad gpio6=%u gpio7=%u gpio8=%u gpio9=%u gpio72=%u\n", tag,
++		touch_rd(st.gpio, TOUCH_GPIO_IO(6)) & 1u, touch_rd(st.gpio, TOUCH_GPIO_IO(7)) & 1u,
++		touch_rd(st.gpio, TOUCH_GPIO_IO(8)) & 1u, touch_rd(st.gpio, TOUCH_GPIO_IO(9)) & 1u,
++		touch_rd(st.gpio, TOUCH_GPIO_IO(72)) & 1u);
++}
++
++static void
++touch_pixel_probe(void)
++{
++	static const unsigned pins[] = {6, 7, 8, 9, 72};
++	static const uint16_t regs[] = {0xc305, 0xc308, 0xc310, 0xc340, 0xc341, 0xc342, 0xc343, 0xc345, 0xc346};
++	vm_offset_t core = ml_io_map(0x0c440000u, 0x2000);
++	vm_offset_t cnfg = ml_io_map(0x0c40a000u, 0x1000);
++	vm_offset_t obs = ml_io_map(0x0e600000u, 0x10000);
++	uint8_t b = 0xa5;
++	int e;
++
++	printf("SWEET PIXEL: touch diagnostic start (no PMIC writes, no L11C, no gpio90)\n");
++	for (unsigned i = 0; i < sizeof(pins) / sizeof(pins[0]); ++i) {
++		printf("SWEET PIXEL: gpio%u cfg=%#x io=%#x\n", pins[i],
++			touch_rd(st.gpio, TOUCH_GPIO_CFG(pins[i])), touch_rd(st.gpio, TOUCH_GPIO_IO(pins[i])));
++	}
++	if (core && cnfg && obs) {
++		uint32_t ver = touch_rd(core, 0), count = touch_rd(core, 4) & 0x7ffu;
++		int apid = -1;
++		unsigned owner = 0;
++		if (ver >= 0x50000000u && ver < 0x70000000u && count && count <= 512) {
++			for (unsigned i = 0; i < count; ++i) {
++				uint32_t map = touch_rd(core, 0x900u + 4u * i);
++				if (!map || ((map >> 8) & 0xfffu) != 0x0c3u) {
++					continue;
++				}
++				unsigned o = touch_rd(cnfg, 0x700u + 4u * i) & 7u;
++				if (apid < 0 || o == 0) {
++					apid = (int)i;
++					owner = o;
++				}
++			}
++		}
++		printf("SWEET PIXEL: spmi arb=%#x apids=%u pm6150-gpio4 apid=%d owner=%u\n", ver, count, apid, owner);
++		for (unsigned i = 0; apid >= 0 && i < sizeof(regs) / sizeof(regs[0]); ++i) {
++			uint8_t v = 0xee;
++			int r = touch_px_read(obs, apid, regs[i], &v);
++			printf("SWEET PIXEL: pm6150 gpio4 reg %#x = %#x (rc=%d)\n", regs[i], v, r);
++		}
++	} else {
++		printf("SWEET PIXEL: SPMI mapping failed\n");
++	}
++
++	touch_px_levels("before");
++	touch_gpio(72, 0, 0, 0, true, false);     /* switch low (DT default) */
++	touch_gpio(9, 0, 0, 0, false, false);     /* IRQ input, bias-disable */
++	touch_gpio(8, 0, 0, 0, true, false);      /* reset low */
++	touch_gpio(6, 1, 0, 0, false, false);     /* qup11 */
++	touch_gpio(7, 1, 0, 0, false, false);
++	touch_wait(10);
++	touch_gpio(8, 0, 0, 0, true, true);       /* reset high */
++	touch_wait(300);
++	touch_px_levels("after reset");
++
++	st.probing = true;
++	e = touch_read(0x49, 0x00, false, &b, 1);
++	printf("SWEET PIXEL: probe 0x49 err=%d byte=%#x seen=%#x dead=%d\n", e, b, st.irq_status, st.dead);
++	b = 0xa5;
++	e = touch_read(0x6e, 0x00, false, &b, 1);
++	printf("SWEET PIXEL: control 0x6e err=%d byte=%#x seen=%#x dead=%d\n", e, b, st.irq_status, st.dead);
++	st.probing = false;
++	touch_px_levels("after probe");
++	printf("SWEET PIXEL: touch diagnostic done\n");
++}
++
+ static void
+ touch_thread(void *arg, wait_result_t result)
+ {
+@@ -569,6 +665,10 @@
+ 	if (!touch_clocks() || !touch_se_init()) {
+ 		goto out;
+ 	}
++	if (touch_pixel) {
++		touch_pixel_probe();
++		goto out;
++	}
+ 	printf("SWEET TOUCH: TLMM reset=%#x irq=%#x vdd90=%#x; voting L11C through RPMh\n",
+ 	    touch_rd(st.gpio, TOUCH_GPIO_IO(8)), touch_rd(st.gpio, TOUCH_GPIO_IO(9)),
+ 	    touch_rd(st.gpio, TOUCH_GPIO_IO(90)));
+@@ -646,6 +746,7 @@
+ 	st.started = true;
+ 	(void)PE_parse_boot_argn("sweettouch", &enabled, sizeof(enabled));
+ 	(void)PE_parse_boot_argn("sweettouchirq", &st.irq_hint, sizeof(st.irq_hint));
++	touch_pixel = (enabled == 2); /* sweettouch=2: Pixel 4a diagnostics */
+ 	if (!enabled) {
+ 		printf("SWEET TOUCH: disabled (sweettouch=0)\n");
+ 		return;
