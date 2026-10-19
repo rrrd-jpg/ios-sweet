@@ -1,0 +1,22 @@
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -646,10 +646,17 @@
+ 				type, sub, mode, src, en, rc, chb != 0);
+ 			if (chb && !rc && type == 0x10 && sub == 0x11 && mode == 0 && en == 0x80) {
+ 				int w1, w2;
++				vm_offset_t ch = chb + (pa & 0x3fffu);
++				uint32_t s0;
+ 				touch_gpio(72, 0, 0, 0, true, false);   /* switch low */
+ 				touch_gpio(8, 0, 0, 0, true, false);    /* chip held in reset while powering */
+-				w1 = touch_px_write(chb + (pa & 0x3fffu), 0x44, 0x80);  /* source 0, inverted = high */
+-				w2 = touch_px_write(chb + (pa & 0x3fffu), 0x40, 0x02);  /* output enable */
++				printf("SWEET PIXEL: gpio4 step1 chan pa=%#x va=%#llx\n", pa, (unsigned long long)ch);
++				s0 = touch_rd(ch, 0x08u);
++				printf("SWEET PIXEL: gpio4 step2 chan status read=%#x\n", s0);
++				w1 = touch_px_write(ch, 0x44, 0x80);    /* source 0, inverted = high */
++				printf("SWEET PIXEL: gpio4 step3 write 0x44 rc=%d\n", w1);
++				w2 = touch_px_write(ch, 0x40, 0x02);    /* output enable */
++				printf("SWEET PIXEL: gpio4 step4 write 0x40 rc=%d\n", w2);
+ 				touch_wait(30);
+ 				rc = touch_px_read(obs, apid, 0xc340, &mode);
+ 				rc |= touch_px_read(obs, apid, 0xc344, &src);
