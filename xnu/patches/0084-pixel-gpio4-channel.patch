@@ -1,0 +1,20 @@
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -632,7 +632,7 @@
+ 			printf("SWEET PIXEL: pm6150 gpio4 reg %#x = %#x (rc=%d)\n", regs[i], v, r);
+ 		}
+ 		if (apid >= 0 && owner == 0) {
+-			unsigned pa = 0x0c600000u + 0x80u * (unsigned)apid;     /* chnls, EE0 */
++			unsigned pa = 0x0c600000u + 0x10000u * (unsigned)apid;  /* chnls RW: 0x10000 * apid (spmi-pmic-arb v5) */
+ 			vm_offset_t chb = ml_io_map(pa & ~0x3fffu, 0x4000);
+ 			uint8_t type = 0xee, sub = 0xee, mode = 0xee, src = 0xee, en = 0xee, val = 0xee;
+ 			int rc;
+@@ -654,7 +654,7 @@
+ 				printf("SWEET PIXEL: gpio4 step2 chan status read=%#x\n", s0);
+ 				w1 = touch_px_write(ch, 0x44, 0x80);    /* source 0, inverted = high */
+ 				printf("SWEET PIXEL: gpio4 step3 write 0x44 rc=%d\n", w1);
+-				w2 = touch_px_write(ch, 0x40, 0x02);    /* output enable */
++				w2 = touch_px_write(ch, 0x40, 0x01);    /* MODE_CTL: digital output */
+ 				printf("SWEET PIXEL: gpio4 step4 write 0x40 rc=%d\n", w2);
+ 				touch_wait(30);
+ 				rc = touch_px_read(obs, apid, 0xc340, &mode);
