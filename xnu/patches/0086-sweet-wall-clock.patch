@@ -1,0 +1,57 @@
+--- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
++++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+@@ -9,6 +9,8 @@
+ #include <IOKit/IOPlatformExpert.h>
+ #include <IOKit/IODeviceTreeSupport.h>
+ #include <IOKit/IOLib.h>
++#include <kern/clock.h>
++#include <pexpert/pexpert.h>
+ 
+ class SweetPlatformExpert : public IODTPlatformExpert {
+ 	OSDeclareDefaultStructors(SweetPlatformExpert);
+@@ -18,6 +20,8 @@
+ 	void processTopLevel(IORegistryEntry *root) APPLE_KEXT_OVERRIDE;
+ 	const char *deleteList(void) APPLE_KEXT_OVERRIDE;
+ 	const char *excludeList(void) APPLE_KEXT_OVERRIDE;
++	long getGMTTimeOfDay(void) APPLE_KEXT_OVERRIDE;
++	void setGMTTimeOfDay(long secs) APPLE_KEXT_OVERRIDE;
+ };
+ 
+ OSDefineMetaClassAndStructors(SweetPlatformExpert, IODTPlatformExpert);
+@@ -30,10 +34,36 @@
+ 		return false;
+ 	}
+ 	registerService();
++	/* No RTC driver: answer IOKitInitializeTime() at once instead of waiting 30 s for IORTC. */
++	publishResource("IORTC", kOSBooleanTrue);
+ 	IOLog("SWEET: platform expert registered\n");
+ 	return true;
+ }
+ 
++/*
++ * Wall clock for clock_initialize_calendar(): boot-arg sweettime=<unix secs>
++ * (stamped when the payload is built) plus time since boot. There is no RTC
++ * driver, so without the boot-arg the time stays at the epoch.
++ */
++long
++SweetPlatformExpert::getGMTTimeOfDay(void)
++{
++	uint64_t base = 0;
++	if (!PE_parse_boot_argn("sweettime", &base, sizeof(base)) || base == 0) {
++		return 0;
++	}
++	clock_sec_t up;
++	clock_usec_t upus;
++	clock_get_system_microtime(&up, &upus);
++	return (long)(base + up);
++}
++
++void
++SweetPlatformExpert::setGMTTimeOfDay(long secs)
++{
++	(void)secs;     /* nothing to write it to */
++}
++
+ const char *
+ SweetPlatformExpert::deleteList(void)
+ {
