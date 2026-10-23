@@ -1,0 +1,121 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp	2026-10-23 20:10:36.088670760 +0900
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp	2026-10-23 20:10:36.126558455 +0900
+@@ -104,6 +104,7 @@
+ 	uint32_t      fWidth, fHeight, fRowBytes;
+ 	uint32_t      fLogicalW, fLogicalH;     /* size reported to userland */
+ 	int32_t       fOffX, fOffY;             /* logical origin of the panel */
++	bool       fScale;	/* sweetfb_scale: logical display scaled onto the panel */
+ 	uintptr_t     fPixels;          /* kernel mapping of the panel memory */
+ 	IOMemoryMap  *fMap;
+ 	SweetSurface *fSurface;         /* the panel memory as an IOSurface */
+@@ -168,6 +169,12 @@
+ 	}
+ 	int native = 0;
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
++	int hgt = 0, scale = 0;
++	PE_parse_boot_argn("sweetfb_height", &hgt, sizeof(hgt));
++	PE_parse_boot_argn("sweetfb_scale", &scale, sizeof(scale));
++	if (hgt > 0 && (uint32_t)hgt < fHeight) {
++		fHeight = (uint32_t)hgt;
++	}
+ 	fLogicalW = fWidth;
+ 	fLogicalH = fHeight;
+ 	if (!native && fWidth <= SWEET_FB_LOGICAL_W && fHeight <= SWEET_FB_LOGICAL_H) {
+@@ -176,6 +183,13 @@
+ 	}
+ 	fOffX = (int32_t)(fLogicalW - fWidth) / 2;
+ 	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
++	fScale = scale != 0;
++	if (fScale) {
++		fLogicalW = SWEET_FB_LOGICAL_W;
++		fLogicalH = SWEET_FB_LOGICAL_H;
++		fOffX = fOffY = 0;
++		IOLog("SWEET FB: scaling %ux%u -> panel %ux%u\n", fLogicalW, fLogicalH, fWidth, fHeight);
++	}
+ 	fLock = IOLockAlloc();
+ 	fClients = OSArray::withCapacity(4);
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+@@ -308,6 +322,41 @@
+ 	}
+ }
+ 
++/* Nearest-neighbour blit of a logical-display rect onto the panel (sweetfb_scale). */
++static void
++sweet_fb_blit_scaled(uintptr_t pixels, uint32_t rowBytes, uint32_t pw, uint32_t ph,
++	uint32_t lw, uint32_t lh, uintptr_t src, uint32_t srcBpr,
++	int32_t sx, int32_t sy, int32_t dx, int32_t dy, int32_t w, int32_t h)
++{
++	int64_t px0 = ((int64_t)dx * pw) / lw;
++	int64_t px1 = (((int64_t)(dx + w) * pw) + lw - 1) / lw;
++	int64_t py0 = ((int64_t)dy * ph) / lh;
++	int64_t py1 = (((int64_t)(dy + h) * ph) + lh - 1) / lh;
++	if (px1 > (int64_t)pw) {
++		px1 = pw;
++	}
++	if (py1 > (int64_t)ph) {
++		py1 = ph;
++	}
++	if (px0 >= px1 || py0 >= py1) {
++		return;
++	}
++	uint64_t stepx = ((uint64_t)lw << 16) / pw;
++	uint64_t stepy = ((uint64_t)lh << 16) / ph;
++	for (int64_t py = py0; py < py1; py++) {
++		int32_t row = (int32_t)(((uint64_t)py * stepy) >> 16) - dy;
++		row = row < 0 ? 0 : (row > h - 1 ? h - 1 : row);
++		const uint32_t *srow = (const uint32_t *)(src + (uint64_t)(sy + row) * srcBpr + (uint64_t)sx * 4);
++		uint32_t *drow = (uint32_t *)(pixels + (uint64_t)py * rowBytes);
++		uint64_t fx = (uint64_t)px0 * stepx;
++		for (int64_t px = px0; px < px1; px++, fx += stepx) {
++			int32_t col = (int32_t)(fx >> 16) - dx;
++			col = col < 0 ? 0 : (col > w - 1 ? w - 1 : col);
++			drow[px] = srow[col];
++		}
++	}
++}
++
+ void
+ AppleCLCD::present(const uint8_t *rec)
+ {
+@@ -378,10 +427,10 @@
+ 		if (h > (int32_t)s->height - sy) {
+ 			h = (int32_t)s->height - sy;
+ 		}
+-		if (w > (int32_t)fWidth - dx) {
++		if (!fScale && w > (int32_t)fWidth - dx) {
+ 			w = (int32_t)fWidth - dx;
+ 		}
+-		if (h > (int32_t)fHeight - dy) {
++		if (!fScale && h > (int32_t)fHeight - dy) {
+ 			h = (int32_t)fHeight - dy;
+ 		}
+ 		uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow +
+@@ -390,7 +439,10 @@
+ 		    s->memory == NULL || last > s->memory->getLength()) {
+ 			src = 0;
+ 		}
+-		if (src != 0 && bpe == 4) {
++		if (src != 0 && bpe == 4 && fScale) {
++			sweet_fb_blit_scaled(fPixels, fRowBytes, fWidth, fHeight, fLogicalW, fLogicalH,
++			    src + s->offset, s->bytesPerRow, sx, sy, dx, dy, w, h);
++		} else if (src != 0 && bpe == 4) {
+ 			for (int32_t y = 0; y < h; y++) {
+ 				memcpy((void *)(fPixels + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4),
+ 				    (const void *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4),
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp	2026-10-23 20:10:36.089607356 +0900
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp	2026-10-23 20:10:36.126820631 +0900
+@@ -438,6 +438,14 @@
+ 	fLogicalH = native ? 2400 : 2436;
+ 	fOffX = (fLogicalW - 1080) / 2;
+ 	fOffY = (fLogicalH - 2400) / 2;
++	int scale = 0, hgt = 0;
++	PE_parse_boot_argn("sweetfb_scale", &scale, sizeof(scale));
++	PE_parse_boot_argn("sweetfb_height", &hgt, sizeof(hgt));
++	if (scale) {
++		fLogicalW = 1080;
++		fLogicalH = (hgt > 0 && hgt < 2400) ? hgt : 2400;
++		fOffX = fOffY = 0;
++	}
+ 	/* The digitizer covers the main display (backboardd maps it 1:1). */
+ 	setProperty("DisplayIntegrated", kOSBooleanTrue);
+ 	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 */
