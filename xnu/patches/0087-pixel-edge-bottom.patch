@@ -1,0 +1,7 @@
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -475,3 +475,3 @@
+ 		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > 1079 - SWEET_TOUCH_EDGE_PX ||
+-		    y < SWEET_TOUCH_EDGE_PX || y > 2399 - SWEET_TOUCH_EDGE_PX;
++		    y < SWEET_TOUCH_EDGE_PX || y > 2339 - 120;    /* Pixel 4a: 2340 rows, 120 px bottom zone */
+ 	}
