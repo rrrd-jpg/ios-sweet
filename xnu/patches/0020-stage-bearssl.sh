@@ -6,21 +6,31 @@ set -euo pipefail
 bearssl_sha=7bea48e5e850ab4cafbe68d3765cdaba13a86d6f
 bearssl_tmp=$(mktemp -d)
 trap 'rm -rf "$bearssl_tmp"' EXIT
-git init -q "$bearssl_tmp"
-# bearssl.org returns 502 / drops connections intermittently: retry.
-fetched=0
-for attempt in 1 2 3 4 5 6; do
-    if git -C "$bearssl_tmp" fetch -q --depth 1 \
-        https://www.bearssl.org/git/BearSSL "$bearssl_sha"; then
-        fetched=1
-        break
-    fi
-    echo "BearSSL fetch failed (attempt $attempt/6)" >&2
-    [[ $attempt -lt 6 ]] && sleep $((attempt * 20))
-done
-[[ $fetched == 1 ]] || { echo "BearSSL fetch failed after 6 attempts" >&2; exit 1; }
-git -C "$bearssl_tmp" checkout -q FETCH_HEAD
-[[ "$(git -C "$bearssl_tmp" rev-parse HEAD)" == "$bearssl_sha" ]]
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+vendored="$here/../vendor/bearssl-${bearssl_sha:0:7}.tar.gz"
+vendored_sha256=5d8d3c242e8279068ce24d79d98a845d0e0cb0bcdfcc948a45e2c4350ba83e7f
+if [[ -f "$vendored" ]]; then
+    # Vendored copy of the pinned commit: no dependency on bearssl.org.
+    [[ "$(shasum -a 256 "$vendored" | cut -d' ' -f1)" == "$vendored_sha256" ]] \
+        || { echo "vendored BearSSL checksum mismatch" >&2; exit 1; }
+    tar xzf "$vendored" -C "$bearssl_tmp" --strip-components=1
+else
+    git init -q "$bearssl_tmp"
+    # bearssl.org returns 502 / drops connections intermittently: retry.
+    fetched=0
+    for attempt in 1 2 3 4 5 6; do
+        if git -C "$bearssl_tmp" fetch -q --depth 1 \
+            https://www.bearssl.org/git/BearSSL "$bearssl_sha"; then
+            fetched=1
+            break
+        fi
+        echo "BearSSL fetch failed (attempt $attempt/6)" >&2
+        [[ $attempt -lt 6 ]] && sleep $((attempt * 20))
+    done
+    [[ $fetched == 1 ]] || { echo "BearSSL fetch failed after 6 attempts" >&2; exit 1; }
+    git -C "$bearssl_tmp" checkout -q FETCH_HEAD
+    [[ "$(git -C "$bearssl_tmp" rev-parse HEAD)" == "$bearssl_sha" ]]
+fi
 python3 - "$bearssl_tmp" <<'PY'
 from pathlib import Path
 import shutil
