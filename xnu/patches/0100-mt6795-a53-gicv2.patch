@@ -1,0 +1,216 @@
+diff --git a/makedefs/MakeInc.def b/makedefs/MakeInc.def
+index a10574b..db3b454 100644
+--- a/makedefs/MakeInc.def
++++ b/makedefs/MakeInc.def
+@@ -61,7 +61,11 @@ MACHINE_FLAGS_ARM64_T8103 = -DARM64_BOARD_CONFIG_T8103                  -mcpu=ap
+ MACHINE_FLAGS_ARM64_T6000 = -DARM64_BOARD_CONFIG_T6000 		-mcpu=apple-a14
+ MACHINE_FLAGS_ARM64_VMAPPLE = -DARM64_BOARD_CONFIG_VMAPPLE              -march=armv8.5a
+ MACHINE_FLAGS_ARM64_BCM2837 = -DARM64_BOARD_CONFIG_BCM2837
++ifeq ($(SWEET_MT6795),1)
++MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET -DSWEET_MT6795=1 -march=armv8-a+crypto+crc
++else
+ MACHINE_FLAGS_ARM64_SWEET = -DARM64_BOARD_CONFIG_SWEET                -march=armv8.2-a+crypto
++endif
+ 
+ 
+ #
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+index 24f1abc..fe42f76 100644
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1857,12 +1857,23 @@ sleh_irq(arm_saved_state_t *state)
+ 
+ 
+ #if defined(SWEET)
++#if defined(SWEET_MT6795)
++        extern uint32_t sweet_gic_iar(void);
++        extern void sweet_gic_eoir(uint32_t);
++#define SWEET_IAR()      ((uint64_t)sweet_gic_iar())
++#define SWEET_EOIR(v)    sweet_gic_eoir((uint32_t)(v))
++#define SWEET_IAR_MASK   0x3FF
++#else
++#define SWEET_IAR()      __builtin_arm_rsr64("ICC_IAR1_EL1")
++#define SWEET_EOIR(v)    __builtin_arm_wsr64("ICC_EOIR1_EL1", (v))
++#define SWEET_IAR_MASK   0xFFFFFF
++#endif
+ 	/*
+ 	 * sweet: TrustZone owns GIC Group 0, so the timer and IPIs that other
+ 	 * ARM64 targets take as FIQs arrive here as Group 1 IRQs.
+ 	 */
+-	uint64_t iar = __builtin_arm_rsr64("ICC_IAR1_EL1");
+-	uint32_t intid = (uint32_t)(iar & 0xFFFFFF);
++	uint64_t iar = SWEET_IAR();
++	uint32_t intid = (uint32_t)(iar & SWEET_IAR_MASK);
+ 
+ 	if (intid >= 1020 && intid <= 1023) {
+ 		return; /* spurious */
+@@ -1873,11 +1884,11 @@ sleh_irq(arm_saved_state_t *state)
+ 		INTERRUPT_MASKED_DEBUG_START(rtclock_intr, DBG_INTR_TYPE_TIMER);
+ 		rtclock_intr(TRUE);
+ 		INTERRUPT_MASKED_DEBUG_END();
+-		__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
++		SWEET_EOIR(iar);
+ 	} else if (intid < 16) {
+ 		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_IPI);
+ 		/* Ack before handling so an IPI raised meanwhile is not lost */
+-		__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
++		SWEET_EOIR(iar);
+ 		__builtin_arm_isb(ISB_SY);
+ 		cpu_signal_handler();
+ 	} else {
+@@ -1888,7 +1899,7 @@ sleh_irq(arm_saved_state_t *state)
+ 			    cdp->interrupt_nub,
+ 			    intid);
+ 		}
+-		__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
++		SWEET_EOIR(iar);
+ 	}
+ 	__builtin_arm_isb(ISB_SY);
+ #else
+diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
+index 6089db9..4f39e70 100644
+--- a/pexpert/arm/pe_fiq.c
++++ b/pexpert/arm/pe_fiq.c
+@@ -13,7 +13,109 @@
+ #include <pexpert/arm64/board_config.h>
+ 
+ 
+-#if HAS_GIC_V3
++#if defined(SWEET_MT6795)
++/*
++ * MT6795: GIC-400 (GICv2) with a memory-mapped CPU interface; the Cortex-A53
++ * has no ICC_* registers. DT /arm-io/gic "reg" = { GICD base, size, GICC base, size }.
++ * Everything we own is Group 1 (non-secure) and arrives as an IRQ.
++ */
++SECURITY_READ_ONLY_LATE(uint32_t) sweet_vtimer_intid = SWEET_VTIMER_INTID;
++
++static vm_offset_t gicd_base;
++static vm_offset_t gicc_base;
++
++#define GICD_CTLR_V2        0x000
++#define GICD_TYPER_V2       0x004
++#define GICD_IGROUPR0_V2    0x080
++#define GICD_ISENABLER0_V2  0x100
++#define GICD_IPRIORITYR0_V2 0x400
++#define GICC_CTLR_V2        0x000
++#define GICC_PMR_V2         0x004
++#define GICC_BPR_V2         0x008
++#define GICC_IAR_V2         0x00c
++#define GICC_EOIR_V2        0x010
++
++static inline uint32_t
++v2_rd(vm_offset_t addr)
++{
++        return *((volatile uint32_t *) addr);
++}
++
++static inline void
++v2_wr(vm_offset_t addr, uint32_t value)
++{
++        *((volatile uint32_t *) addr) = value;
++}
++
++uint32_t
++sweet_gic_iar(void)
++{
++        return v2_rd(gicc_base + GICC_IAR_V2);
++}
++
++void
++sweet_gic_eoir(uint32_t value)
++{
++        v2_wr(gicc_base + GICC_EOIR_V2, value);
++}
++
++void
++pe_init_fiq()
++{
++        if (!gicd_base) {
++                DTEntry entry;
++                void const *prop;
++                unsigned int prop_size;
++
++                if (SecureDTLookupEntry(NULL, "/arm-io/gic", &entry) != kSuccess) {
++                        panic("%s: cannot find GIC node in DT", __func__);
++                }
++                if (SecureDTGetProperty(entry, "reg", &prop, &prop_size) != kSuccess) {
++                        panic("%s: cannot find GIC MMIO regions in DT", __func__);
++                }
++                if (prop_size < 4 * sizeof(uint64_t)) {
++                        panic("%s: GIC reg property too small (%u bytes)", __func__, prop_size);
++                }
++
++                void const *timer_prop;
++                unsigned int timer_size;
++                if (SecureDTGetProperty(entry, "virtual-timer-intid", &timer_prop, &timer_size) == kSuccess &&
++                    timer_size == sizeof(uint32_t)) {
++                        uint32_t intid = *(const uint32_t *)timer_prop;
++                        if (intid < 16 || intid >= 32) {
++                                panic("%s: virtual timer INTID %u is not a PPI", __func__, intid);
++                        }
++                        sweet_vtimer_intid = intid;
++                }
++
++                vm_offset_t soc_base_phys = pe_arm_get_soc_base_phys();
++                uint64_t const *reg = (uint64_t const *) prop;
++                vm_offset_t d = ml_io_map(soc_base_phys + reg[0], reg[1]);
++                vm_offset_t c = ml_io_map(soc_base_phys + reg[2], reg[3]);
++                if (!d || !c) {
++                        panic("%s: cannot map GIC regions", __func__);
++                }
++                gicc_base = c;
++                gicd_base = d; /* sentinel: set last */
++                kprintf("SWEET GICv2: GICD_TYPER %#x, virtual timer INTID %u\n",
++                    v2_rd(gicd_base + GICD_TYPER_V2), sweet_vtimer_intid);
++        }
++
++        /* Banked per-CPU registers */
++        v2_wr(gicd_base + GICD_IGROUPR0_V2, 0xFFFFFFFF);
++        for (unsigned int i = 0; i < 32; i += 4) {
++                v2_wr(gicd_base + GICD_IPRIORITYR0_V2 + i, 0xA0A0A0A0);
++        }
++        v2_wr(gicd_base + GICD_ISENABLER0_V2, (1U << sweet_vtimer_intid) | (1U << SWEET_IPI_SGI));
++
++        v2_wr(gicc_base + GICC_PMR_V2, 0xFF);
++        v2_wr(gicc_base + GICC_BPR_V2, 0);
++        v2_wr(gicc_base + GICC_CTLR_V2, 1);                    /* EnableGrp1 (NS) */
++        v2_wr(gicd_base + GICD_CTLR_V2, v2_rd(gicd_base + GICD_CTLR_V2) | 1);
++        __builtin_arm_dsb(DSB_SY);
++        __builtin_arm_isb(ISB_SY);
++}
++#elif HAS_GIC_V3
+ #define GICR_WAKE_TIMEOUT_NS (1000000000ULL) // timeout for redistributor wakeup (default 1s)
+ MACHINE_TIMEOUT(gicr_wake_timeout_ns, "gicr-wake-timeout", GICR_WAKE_TIMEOUT_NS, MACHINE_TIMEOUT_UNIT_NSEC, NULL);
+ 
+diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
+index b99c2f4..0be5a08 100644
+--- a/pexpert/pexpert/arm64/SWEET.h
++++ b/pexpert/pexpert/arm64/SWEET.h
+@@ -33,10 +33,15 @@
+ #define __ARM_DEBUG__             7
+ #define __ARM_ENABLE_SWAP__       1
+ #define __ARM_V8_CRYPTO_EXTENSIONS__ 1
++#ifdef SWEET_MT6795
++/* Cortex-A53 (ARMv8.0): no PAN, no 16K granule; GIC-400 (GICv2) */
++#define HAS_GIC_V2                1
++#else
+ #define __ARM_PAN_AVAILABLE__     1
+ #define __ARM_16K_PG__            1
+ 
+ #define HAS_GIC_V3                1
++#endif
+ 
+ #ifndef ASSEMBLER
+ #define PLATFORM_PANIC_LOG_DISABLED
+@@ -47,7 +52,11 @@
+  * virt, hyp) instead of the usual 13/14/11/10: the virtual timer XNU uses
+  * (CNTV) is INTID 16 + 3 = 19.
+  */
++#ifdef SWEET_MT6795
++#define SWEET_VTIMER_INTID        27      /* standard PPI 11 (MT6795 DTS) */
++#else
+ #define SWEET_VTIMER_INTID        19
++#endif
+ #define SWEET_IPI_SGI             1       // SGI used for cross-CPU signals
+ 
+ #define GIC_SPURIOUS_IRQ          1023    // IRQ no. for GIC spurious interrupt

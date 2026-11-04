@@ -12,6 +12,9 @@ on:
       machine_config:
         description: xnu MACHINE_CONFIG
         default: SWEET
+      mt6795:
+        description: "1 = SWEET config for MT6795 (Cortex-A53, 4K pages, GICv2)"
+        default: "0"
       keep_going:
         description: make -k (collect all compile errors in one run)
         default: "true"
@@ -31,6 +34,7 @@ env:
   MACOS_VERSION: ${{ inputs.macos_version || '13.5' }}
   KERNEL_CONFIG: ${{ inputs.kernel_config || 'DEVELOPMENT' }}
   MACHINE_CONFIG: ${{ inputs.machine_config || 'SWEET' }}
+  SWEET_MT6795: ${{ inputs.mt6795 || '0' }}
 
 jobs:
   build:
