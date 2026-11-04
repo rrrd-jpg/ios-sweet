@@ -8,3 +8,7 @@ shim/out/
 xnu/out/
 xnu/out-*/
 __pycache__/
+copy/
+ramoops.bin
+dmesg_fb.txt
+shim/mt6795/out/
