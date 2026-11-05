@@ -26,6 +26,8 @@
 #define DECON_TRIG       0x70
 #define DARK        0xff202020U
 
+#define PMU_BASE    0x15860000UL
+
 static volatile int probe_armed, probe_fault;
 
 static void __attribute__((noreturn)) halt(void)
@@ -34,11 +36,22 @@ static void __attribute__((noreturn)) halt(void)
                 __asm__ volatile("wfe");
 }
 
+static volatile uint64_t sec_midr[8], sec_mpidr[8];
+static volatile uint32_t sec_flag[8];
+
 void secondary_main(uint64_t idx)
 {
-        (void)idx;
+        if (idx < 8) {
+                sec_midr[idx] = rsr("midr_el1");
+                sec_mpidr[idx] = rsr("mpidr_el1");
+                __asm__ volatile("dsb sy" ::: "memory");
+                sec_flag[idx] = 0xa5a50000u | (uint32_t)idx;
+        }
         halt();
 }
+
+static void flush(void);
+static void delay_ms(unsigned ms);
 
 void exc_handler(uint64_t slot, uint64_t *regs)
 {
@@ -66,7 +79,10 @@ void exc_handler(uint64_t slot, uint64_t *regs)
         con_hex("X1", regs[1]);
         con_hex("X30", regs[29]);
         con_str("HALT", "hold POWER+VOLDOWN 7s");
-        halt();
+        for (;;) {
+                flush();
+                delay_ms(500);
+        }
 }
 
 static uint32_t safe_rd32(uintptr_t a)
@@ -308,6 +324,66 @@ static void page5(void)
         con_str("HALT", "hold POWER+VOLDOWN 7s");
 }
 
+static void page6(void)
+{
+        static const uint32_t tgt[7] = { 0x001, 0x002, 0x003, 0x004, 0x005, 0x100, 0x101 };
+        char l[5];
+        uint64_t entry, end, lastf = 0;
+        int go = 0;
+
+        con_clear(BLUE);
+        con_str("S10E", "probe 6/6: cpu_on, swreset");
+        con_skip();
+        __asm__ volatile("adr %0, secondary_entry" : "=r"(entry));
+        con_hex("ENTRY", entry);
+        flush();
+        l[0] = 'C'; l[1] = 'P'; l[2] = 'U'; l[4] = 0;
+        for (unsigned i = 0; i < 7; i++) {
+                uint32_t ret = (uint32_t)smc(0xc4000003, tgt[i], entry, i + 1);
+                unsigned n = 0;
+
+                while (!sec_flag[i + 1] && n++ < 100)
+                        delay_ms(5);
+                l[3] = '1' + i;
+                con_hex2(l, "ret=", ret, "midr=", sec_flag[i + 1] ? (uint32_t)sec_midr[i + 1] : 0);
+                flush();
+        }
+        for (unsigned i = 1; i < 8; i++)
+                if (sec_flag[i])
+                        con_hex2("MPIDR", "cpu=", i, "val=", (uint32_t)sec_mpidr[i]);
+        con_skip();
+        con_str("NEXT", "VOL UP = test PMU SWRESET");
+        flush();
+        end = now() + freq() * 30;
+        while (now() < end) {
+                if (now() - lastf > freq() / 2) {
+                        flush();
+                        lastf = now();
+                }
+                if (volup_pressed()) {
+                        delay_ms(40);
+                        if (volup_pressed()) {
+                                go = 1;
+                                break;
+                        }
+                }
+        }
+        if (go) {
+                con_str("RESET", "writing PMU SWRESET");
+                flush();
+                delay_ms(500);
+                wr32(PMU_BASE + 0x404, 0);
+                wr32(PMU_BASE + 0x3a00, 1u << 1);
+                delay_ms(3000);
+                con_str("RESET", "no effect after 3 s");
+        }
+        con_str("HALT", "hold POWER+VOLDOWN 7s");
+        for (;;) {
+                flush();
+                delay_ms(500);
+        }
+}
+
 void shim_main(uint64_t dtb)
 {
         con_fb = (volatile uint32_t *)FB_BASE;
@@ -321,5 +397,8 @@ void shim_main(uint64_t dtb)
         page3();
         page4();
         page5();
+        flush();
+        delay_ms(5000);
+        page6();
         halt();
 }
