@@ -38,6 +38,39 @@ static void __attribute__((noreturn)) halt(void)
 
 static volatile uint64_t sec_midr[8], sec_mpidr[8];
 static volatile uint32_t sec_flag[8];
+volatile uint64_t sec_raw_x0[8];
+volatile uint32_t sec_arrived[8];
+
+/*
+ * CPU_ON target. Samsung's firmware may not pass the context id in x0, so the
+ * slot comes from MPIDR (aff0 for cores 0-5, 6 + aff0 for the aff1 = 1
+ * cluster). Record arrival first, then use the normal entry with x0 = slot.
+ */
+__asm__(
+"	.text\n"
+"	.balign 4\n"
+"	.globl s10e_sec_entry\n"
+"s10e_sec_entry:\n"
+"	msr	daifset, #0xf\n"
+"	mrs	x2, mpidr_el1\n"
+"	and	x3, x2, #0xff\n"
+"	ubfx	x4, x2, #8, #8\n"
+"	add	x5, x3, #6\n"
+"	cmp	x4, #0\n"
+"	csel	x1, x3, x5, eq\n"
+"	cmp	x1, #8\n"
+"	b.hs	1f\n"
+"	adr	x6, sec_raw_x0\n"
+"	str	x0, [x6, x1, lsl #3]\n"
+"	adr	x7, sec_arrived\n"
+"	mov	w8, #0x5ec\n"
+"	str	w8, [x7, x1, lsl #2]\n"
+"	dsb	sy\n"
+"	mov	x0, x1\n"
+"	b	secondary_entry\n"
+"1:	wfe\n"
+"	b	1b\n"
+);
 
 void secondary_main(uint64_t idx)
 {
@@ -334,7 +367,7 @@ static void page6(void)
         con_clear(BLUE);
         con_str("S10E", "probe 6/6: cpu_on, swreset");
         con_skip();
-        __asm__ volatile("adr %0, secondary_entry" : "=r"(entry));
+        __asm__ volatile("adr %0, s10e_sec_entry" : "=r"(entry));
         con_hex("ENTRY", entry);
         flush();
         l[0] = 'C'; l[1] = 'P'; l[2] = 'U'; l[4] = 0;
@@ -342,15 +375,19 @@ static void page6(void)
                 uint32_t ret = (uint32_t)smc(0xc4000003, tgt[i], entry, i + 1);
                 unsigned n = 0;
 
-                while (!sec_flag[i + 1] && n++ < 100)
+                while (!sec_flag[i + 1] && n++ < 200)
                         delay_ms(5);
                 l[3] = '1' + i;
                 con_hex2(l, "ret=", ret, "midr=", sec_flag[i + 1] ? (uint32_t)sec_midr[i + 1] : 0);
                 flush();
         }
-        for (unsigned i = 1; i < 8; i++)
+        for (unsigned i = 1; i < 8; i++) {
+                if (!sec_arrived[i])
+                        continue;
+                con_hex2("ARRIVED", "cpu=", i, "x0=", (uint32_t)sec_raw_x0[i]);
                 if (sec_flag[i])
                         con_hex2("MPIDR", "cpu=", i, "val=", (uint32_t)sec_mpidr[i]);
+        }
         con_skip();
         con_str("NEXT", "VOL UP = test PMU SWRESET");
         flush();
