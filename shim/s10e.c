@@ -112,9 +112,27 @@ void secondary_main(uint64_t idx)
 static void flush(void);
 static void delay_ms(unsigned ms);
 
+static volatile uint32_t irq_armed, irq_cnt, irq_last_iar;
+
 void exc_handler(uint64_t slot, uint64_t *regs)
 {
         uint64_t esr = rsr("esr_el1");
+
+        /* GICv2 IRQ at EL1 (current EL, SPx): ack, quiesce the timer, EOI */
+        if (slot == 5 && irq_armed) {
+                uint32_t iar = *(volatile uint32_t *)(GICC_BASE + 0x0c);
+                uint32_t id = iar & 0x3ff;
+
+                irq_last_iar = iar;
+                irq_cnt++;
+                wsr("cntv_ctl_el0", 0);
+                wsr("cntp_ctl_el0", 0);
+                if (id < 1020)
+                        *(volatile uint32_t *)(GICC_BASE + 0x10) = iar;
+                if (irq_cnt > 100)      /* storm guard: stay masked after eret */
+                        wsr("spsr_el1", rsr("spsr_el1") | 0x80);
+                return;
+        }
 
         /* a faulting MMIO read inside safe_rd32(): skip the ldr and carry on */
         if (probe_armed && slot == 4 && (esr >> 26) == 0x25) {
@@ -518,6 +536,99 @@ static void page7(void)
         }
 }
 
+static void __attribute__((noreturn)) reset_prompt(void)
+{
+        uint64_t end, lastf = 0;
+        int go = 0;
+
+        con_str("NEXT", "VOL UP = test PMU SWRESET");
+        flush();
+        end = now() + freq() * 30;
+        while (now() < end) {
+                if (now() - lastf > freq() / 2) {
+                        flush();
+                        lastf = now();
+                }
+                if (volup_pressed()) {
+                        delay_ms(40);
+                        if (volup_pressed()) {
+                                go = 1;
+                                break;
+                        }
+                }
+        }
+        if (go) {
+                con_str("RESET", "writing PMU SWRESET");
+                flush();
+                delay_ms(500);
+                wr32(PMU_BASE + 0x404, 0);
+                wr32(PMU_BASE + 0x3a00, 1u << 1);
+                delay_ms(3000);
+                con_str("RESET", "no effect after 3 s");
+        }
+        con_str("HALT", "hold POWER+VOLDOWN 7s");
+        for (;;) {
+                flush();
+                delay_ms(500);
+        }
+}
+
+static void irq_test(const char *name, unsigned id, int virt)
+{
+        uint32_t ctl, pend, en, hppir;
+        unsigned n = 0;
+
+        irq_cnt = 0;
+        irq_last_iar = 0;
+        wr32(GICD_BASE + 0x000, 1);                             /* EnableGrp1 (NS view) */
+        *(volatile uint8_t *)(GICD_BASE + 0x400 + id) = 0x80;   /* priority */
+        wr32(GICD_BASE + 0x100, 1u << id);                      /* set-enable */
+        wr32(GICC_BASE + 0x04, 0xf0);
+        wr32(GICC_BASE + 0x00, 1);
+        en = safe_rd32(GICD_BASE + 0x100);
+        irq_armed = 1;
+        __asm__ volatile("msr daifset, #2" ::: "memory");
+        if (virt) {
+                wsr("cntv_tval_el0", freq() / 1000);
+                wsr("cntv_ctl_el0", 1);
+        } else {
+                wsr("cntp_tval_el0", freq() / 1000);
+                wsr("cntp_ctl_el0", 1);
+        }
+        delay_ms(5);
+        ctl = virt ? rsr("cntv_ctl_el0") : rsr("cntp_ctl_el0");
+        pend = safe_rd32(GICD_BASE + 0x200);
+        hppir = safe_rd32(GICC_BASE + 0x18);
+        __asm__ volatile("msr daifclr, #2" ::: "memory");
+        while (!irq_cnt && n++ < 50)
+                delay_ms(1);
+        __asm__ volatile("msr daifset, #2" ::: "memory");
+        wsr("cntv_ctl_el0", 0);
+        wsr("cntp_ctl_el0", 0);
+        con_hex2(name, "ctl=", ctl, "pend=", pend);
+        con_hex2("", "en=", en, "hppir=", hppir);
+        con_hex2("", "irqs=", irq_cnt, "iar=", irq_last_iar);
+        wr32(GICD_BASE + 0x180, 1u << id);
+        irq_armed = 0;
+        flush();
+}
+
+static void page8(void)
+{
+        con_clear(BLUE);
+        con_str("S10E", "probe 8: gicv2 + timer irq");
+        con_skip();
+        con_hex2("GICD", "ctlr=", safe_rd32(GICD_BASE), "typer=", safe_rd32(GICD_BASE + 4));
+        con_hex2("GICC", "ctlr=", safe_rd32(GICC_BASE), "pmr=", safe_rd32(GICC_BASE + 4));
+        con_hex2("PPI", "igrp=", safe_rd32(GICD_BASE + 0x80), "pri27=", safe_rd32(GICD_BASE + 0x418));
+        con_skip();
+        flush();
+        irq_test("VIRT27", 27, 1);
+        irq_test("PHYS30", 30, 0);
+        con_skip();
+        reset_prompt();
+}
+
 void shim_main(uint64_t dtb)
 {
         con_fb = (volatile uint32_t *)FB_BASE;
@@ -527,12 +638,6 @@ void shim_main(uint64_t dtb)
         flush();
         delay_ms(4000);
         page1(dtb);
-        page2();
-        page3();
-        page4();
-        page5();
-        flush();
-        delay_ms(5000);
-        page7();
+        page8();
         halt();
 }

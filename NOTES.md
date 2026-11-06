@@ -440,3 +440,4 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
 - Vol Up = GPA0_DAT (0x15850004) bit 3, active low (verified). Other pins unverified.
 - RAM: 0x80000000-0xbaafffff, 0xc0000000-0xdfffffff, 0xe1900000-0xffffffff, 0x880000000-0x97fffffff.
 - Flash: dd the image to /dev/block/by-name/boot from TWRP. Recover: Vol Down + Power 7 s, then Vol Up + Bixby + Power.
+- GICv2 delivery verified on core 0 (GICD ctlr=1, GICC ctlr=1, pmr 0xF0): virtual timer = INTID 27, physical = INTID 30, both arrive as IRQ at EL1 (iar 0x1B / 0x1E). Use CNTV for XNU.
