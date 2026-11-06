@@ -18,6 +18,15 @@ $OBJCOPY -O binary $O/shim.elf $O/Image
 size=$(aarch64-linux-gnu-nm $O/shim.elf | awk '$3=="_end"{print strtonum("0x"$1)}')
 truncate -s "$size" $O/Image
 (cd $O && rm -rf rd && mkdir rd && cd rd && find . | cpio -o -H newc --quiet | gzip -9 > ../ramdisk.bin)
+if [ -n "${RD_MIB:-}" ]; then
+python3 - "$RD_MIB" "$O/ramdisk.bin" <<'PY'
+import array, sys
+n = int(sys.argv[1]) * 1024 * 1024 // 4
+a = array.array('I', ((i * 0x9E3779B1) & 0xffffffff for i in range(n)))
+with open(sys.argv[2], 'wb') as f:
+    a.tofile(f)
+PY
+fi
 # Same addresses as the stock boot.img (header v1, 2 KiB pages, ramdisk addr 0).
 mkbootimg --header_version 1 --kernel $O/Image --ramdisk $O/ramdisk.bin \
         --base 0 --kernel_offset 0x10008000 --ramdisk_offset 0 --second_offset 0 \

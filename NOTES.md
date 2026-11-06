@@ -441,3 +441,7 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
 - RAM: 0x80000000-0xbaafffff, 0xc0000000-0xdfffffff, 0xe1900000-0xffffffff, 0x880000000-0x97fffffff.
 - Flash: dd the image to /dev/block/by-name/boot from TWRP. Recover: Vol Down + Power 7 s, then Vol Up + Bixby + Power.
 - GICv2 delivery verified on core 0 (GICD ctlr=1, GICC ctlr=1, pmr 0xF0): virtual timer = INTID 27, physical = INTID 30, both arrive as IRQ at EL1 (iar 0x1B / 0x1E). Use CNTV for XNU.
+- Boot core ID regs: MMFR0=0x101122 (16K granule supported, 40-bit PA), PAN, LSE atomics, AES/SHA1/CRC32; 64-byte cache lines. Keep 16K pages and -march=armv8.2-a+crypto.
+- GICv2 self-SGI via GICD_SGIR (0xF00, filter=2) is delivered as IRQ at EL1 (iar=1).
+- s-boot does NOT place the ramdisk at the DT's linux,initrd-start (0x89000000, stale). It sits right after the shim image (shim at 0x80080000 -> ramdisk 0x80094000 in one run, 0x80124000 in another), 24 MiB intact. The loader must scan for SWEETXNU after _end.
+- Probing reserved memory can reset the phone: a read scan of 0x80000000-0xbaaf0000 rebooted it (likely el2_code at 0x87000000). Stay inside known RAM.

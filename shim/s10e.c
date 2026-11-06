@@ -629,6 +629,168 @@ static void page8(void)
         reset_prompt();
 }
 
+static void sgi_test(void)
+{
+        unsigned n = 0;
+
+        irq_cnt = 0;
+        irq_last_iar = 0;
+        wr32(GICD_BASE + 0x000, 1);
+        *(volatile uint8_t *)(GICD_BASE + 0x401) = 0x80;
+        wr32(GICD_BASE + 0x100, 1u << 1);
+        wr32(GICC_BASE + 0x04, 0xf0);
+        wr32(GICC_BASE + 0x00, 1);
+        irq_armed = 1;
+        __asm__ volatile("dsb sy\n\tmsr daifclr, #2" ::: "memory");
+        wr32(GICD_BASE + 0xf00, (2u << 24) | 1u);       /* SGI 1, to self */
+        while (!irq_cnt && n++ < 50)
+                delay_ms(1);
+        __asm__ volatile("msr daifset, #2" ::: "memory");
+        irq_armed = 0;
+        con_hex2("SGI1", "irqs=", irq_cnt, "iar=", irq_last_iar);
+        con_hex2("", "igrp0=", safe_rd32(GICD_BASE + 0x80), "pend=", safe_rd32(GICD_BASE + 0x200));
+        flush();
+}
+
+static void page9(uint64_t dtb)
+{
+        uint64_t is = 0, ie = 0, bad = 0, first = ~0ULL;
+
+        con_clear(BLUE);
+        con_str("S10E", "probe 9: id regs, sgi, ramdisk");
+        con_skip();
+        con_hex("MMFR0", rsr("S3_0_C0_C7_0"));
+        con_hex("MMFR1", rsr("S3_0_C0_C7_1"));
+        con_hex("MMFR2", rsr("S3_0_C0_C7_2"));
+        con_hex("ISAR0", rsr("S3_0_C0_C6_0"));
+        con_hex("ISAR1", rsr("S3_0_C0_C6_1"));
+        con_hex("DFR0", rsr("S3_0_C0_C5_0"));
+        con_hex2("CACHE", "ctr=", rsr("ctr_el0"), "clidr=", rsr("clidr_el1"));
+        con_skip();
+        flush();
+        sgi_test();
+        con_skip();
+        fdt_chosen_u64(dtb, "linux,initrd-start", &is);
+        fdt_chosen_u64(dtb, "linux,initrd-end", &ie);
+        con_hex2("DTB", "at=", dtb, "rdsize=", ie - is);
+        flush();
+        if (is && ie > is) {
+                volatile uint32_t *p = (volatile uint32_t *)is;
+                uint64_t words = (ie - is) / 4;
+
+                for (uint64_t i = 0; i < words; i++)
+                        if (p[i] != (uint32_t)(i * 0x9E3779B1u)) {
+                                if (first == ~0ULL)
+                                        first = i * 4;
+                                bad++;
+                        }
+                con_hex2("RDCHK", "bad=", bad, "first=", first == ~0ULL ? 0xffffffffu : (uint32_t)first);
+        }
+        con_skip();
+        reset_prompt();
+}
+
+static void clean_inval(uintptr_t a, uint64_t n)
+{
+        for (uintptr_t q = a & ~63UL; q < a + n; q += 64)
+                __asm__ volatile("dc civac, %0" :: "r"(q) : "memory");
+        __asm__ volatile("dsb sy" ::: "memory");
+}
+
+static void rd_words(const char *tag, uintptr_t a)
+{
+        con_hex2(tag, "w0=", safe_rd32(a), "w1=", safe_rd32(a + 4));
+        con_hex2("", "w2=", safe_rd32(a + 8), "w3=", safe_rd32(a + 12));
+}
+
+static void page10(uint64_t dtb)
+{
+        static const struct { uint64_t base, size; } reg[] = {
+                { 0x80000000UL, 0x3ab00000UL },
+                { 0xc0000000UL, 0x20000000UL },
+        };
+        uint64_t is = 0, ie = 0;
+        unsigned hits = 0;
+
+        con_clear(BLUE);
+        con_str("S10E", "probe 10: where is the ramdisk");
+        con_skip();
+        fdt_chosen_u64(dtb, "linux,initrd-start", &is);
+        fdt_chosen_u64(dtb, "linux,initrd-end", &ie);
+        con_hex2("DT", "start=", is, "end=", ie);
+        rd_words("RAW", is);
+        clean_inval(is, 1 << 20);
+        rd_words("CLEAN", is);
+        rd_words("TAIL", ie - 16);
+        con_skip();
+        con_str("SCAN", "pattern, 2 KiB steps");
+        flush();
+        for (unsigned r = 0; r < sizeof(reg) / sizeof(reg[0]); r++)
+                for (uint64_t a = reg[r].base; a < reg[r].base + reg[r].size; a += 0x800) {
+                        if (safe_rd32(a + 4) != 0x9E3779B1u || safe_rd32(a + 8) != 0x3C6EF362u ||
+                            safe_rd32(a) != 0)
+                                continue;
+                        if (hits < 6)
+                                con_hex2("FOUND", "at=", a, "n=", hits);
+                        hits++;
+                }
+        con_hex2("SCAN", "hits=", hits, 0, 0);
+        con_skip();
+        reset_prompt();
+}
+
+static uint64_t rd_verify(uintptr_t a, uint64_t bytes, uint64_t *first)
+{
+        volatile uint32_t *p = (volatile uint32_t *)a;
+        uint64_t bad = 0;
+
+        *first = ~0ULL;
+        for (uint64_t i = 0; i < bytes / 4; i++)
+                if (p[i] != (uint32_t)(i * 0x9E3779B1u)) {
+                        if (*first == ~0ULL)
+                                *first = i * 4;
+                        bad++;
+                }
+        return bad;
+}
+
+static void page11(uint64_t dtb)
+{
+        uint64_t is = 0, ie = 0, first, bad, hit0 = 0, head;
+        unsigned hits = 0;
+
+        con_clear(BLUE);
+        con_str("S10E", "probe 11: ramdisk hunt");
+        con_skip();
+        __asm__ volatile("adr %0, _head" : "=r"(head));
+        fdt_chosen_u64(dtb, "linux,initrd-start", &is);
+        fdt_chosen_u64(dtb, "linux,initrd-end", &ie);
+        con_hex2("SHIM", "base=", head, "dtb=", dtb);
+        con_hex2("DT", "start=", is, "end=", ie);
+        flush();
+        for (uint64_t a = 0x80000000UL; a < 0x86f00000UL; a += 0x800) {
+                if (!(a & 0x7fffff)) {
+                        con_hex2("SCAN", "at=", a, "hits=", hits);
+                        flush();
+                }
+                if (safe_rd32(a) != 0 || safe_rd32(a + 4) != 0x9E3779B1u ||
+                    safe_rd32(a + 8) != 0x3C6EF362u)
+                        continue;
+                if (hits < 4)
+                        con_hex2("FOUND", "at=", a, "n=", hits);
+                if (!hits)
+                        hit0 = a;
+                hits++;
+        }
+        flush();
+        if (hit0) {
+                bad = rd_verify(hit0, ie - is, &first);
+                con_hex2("VERIFY", "bad=", bad, "first=", first == ~0ULL ? 0xffffffffu : (uint32_t)first);
+        }
+        con_skip();
+        reset_prompt();
+}
+
 void shim_main(uint64_t dtb)
 {
         con_fb = (volatile uint32_t *)FB_BASE;
@@ -638,6 +800,6 @@ void shim_main(uint64_t dtb)
         flush();
         delay_ms(4000);
         page1(dtb);
-        page8();
+        page11(dtb);
         halt();
 }
