@@ -41,6 +41,32 @@ static volatile uint32_t sec_flag[8];
 volatile uint64_t sec_raw_x0[8];
 volatile uint32_t sec_arrived[8];
 
+/* stackless CPU_ON target: record x0, mpidr, midr, CurrentEL, then park */
+volatile uint64_t s10e_cur[4];
+volatile uint32_t s10e_cur_flag;
+__asm__(
+"	.text\n"
+"	.balign 4\n"
+"	.globl s10e_sec_park\n"
+"s10e_sec_park:\n"
+"	msr	daifset, #0xf\n"
+"	adr	x6, s10e_cur\n"
+"	str	x0, [x6]\n"
+"	mrs	x2, mpidr_el1\n"
+"	str	x2, [x6, #8]\n"
+"	mrs	x2, midr_el1\n"
+"	str	x2, [x6, #16]\n"
+"	mrs	x2, currentel\n"
+"	str	x2, [x6, #24]\n"
+"	dsb	sy\n"
+"	mov	w2, #0x5ec\n"
+"	adr	x6, s10e_cur_flag\n"
+"	str	w2, [x6]\n"
+"	dsb	sy\n"
+"1:	wfe\n"
+"	b	1b\n"
+);
+
 /*
  * CPU_ON target. Samsung's firmware may not pass the context id in x0, so the
  * slot comes from MPIDR (aff0 for cores 0-5, 6 + aff0 for the aff1 = 1
@@ -357,7 +383,7 @@ static void page5(void)
         con_str("HALT", "hold POWER+VOLDOWN 7s");
 }
 
-static void page6(void)
+__attribute__((unused)) static void page6(void)
 {
         static const uint32_t tgt[7] = { 0x001, 0x002, 0x003, 0x004, 0x005, 0x100, 0x101 };
         char l[5];
@@ -421,6 +447,77 @@ static void page6(void)
         }
 }
 
+static void page7(void)
+{
+        static const uint32_t tgt[] = {
+                0x101, 0x100, 0x200, 0x300, 0x102, 0x103, 0x10000, 0x10100, 0x000
+        };
+        char l[8];
+        uint64_t entry, end, lastf = 0;
+        int go = 0;
+
+        con_clear(BLUE);
+        con_str("S10E", "probe 7: cpu_on sweep, swreset");
+        con_skip();
+        __asm__ volatile("adr %0, s10e_sec_park" : "=r"(entry));
+        flush();
+        for (unsigned i = 0; i < sizeof(tgt) / sizeof(tgt[0]); i++) {
+                uint32_t ret;
+                unsigned n = 0;
+
+                s10e_cur_flag = 0;
+                s10e_cur[0] = s10e_cur[1] = s10e_cur[2] = s10e_cur[3] = 0;
+                l[0] = 'T';
+                hexn(l + 1, tgt[i], 5);
+                l[6] = 0;
+                con_str(l, "calling");
+                flush();
+                ret = (uint32_t)smc(0xc4000003, tgt[i], entry, 0);
+                con_hex2("", "back ret=", ret, "t=", (uint32_t)now());
+                flush();
+                while (!s10e_cur_flag && n++ < 100)
+                        delay_ms(5);
+                l[0] = 'T';
+                hexn(l + 1, tgt[i], 5);
+                l[6] = 0;
+                con_hex2(l, "ret=", ret, "mp=", s10e_cur_flag ? (uint32_t)s10e_cur[1] : 0);
+                if (s10e_cur_flag)
+                        con_hex2("", "midr=", (uint32_t)s10e_cur[2], "x0=", (uint32_t)s10e_cur[0]);
+                flush();
+        }
+        con_skip();
+        con_str("NEXT", "VOL UP = test PMU SWRESET");
+        flush();
+        end = now() + freq() * 30;
+        while (now() < end) {
+                if (now() - lastf > freq() / 2) {
+                        flush();
+                        lastf = now();
+                }
+                if (volup_pressed()) {
+                        delay_ms(40);
+                        if (volup_pressed()) {
+                                go = 1;
+                                break;
+                        }
+                }
+        }
+        if (go) {
+                con_str("RESET", "writing PMU SWRESET");
+                flush();
+                delay_ms(500);
+                wr32(PMU_BASE + 0x404, 0);
+                wr32(PMU_BASE + 0x3a00, 1u << 1);
+                delay_ms(3000);
+                con_str("RESET", "no effect after 3 s");
+        }
+        con_str("HALT", "hold POWER+VOLDOWN 7s");
+        for (;;) {
+                flush();
+                delay_ms(500);
+        }
+}
+
 void shim_main(uint64_t dtb)
 {
         con_fb = (volatile uint32_t *)FB_BASE;
@@ -436,6 +533,6 @@ void shim_main(uint64_t dtb)
         page5();
         flush();
         delay_ms(5000);
-        page6();
+        page7();
         halt();
 }
