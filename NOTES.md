@@ -425,3 +425,18 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
      cpu_init, before arm_vm_init.
   5. panic hook at top of panic_trap_to_debugger: va_copy + _doprnt(fmt, &copy, sweet_early_putc, 16).
   Verify with tools/xnu-cc.py (compile+symbols) and patch-order simulation before the single CI run.
+
+## S10e (SM-G970F, Exynos 9820) bring-up facts, from the probe shim
+- s-boot runs our boot.img like a kernel: EL1, MMU/caches off, x0 = DTB at 0x8A000000, ramdisk at 0x89000000 (DT chosen/linux,initrd-*).
+- Boot core: Cortex-A55 r1p0 (midr 0x411FD050, mpidr 0x81000000). cntfrq 26 MHz.
+- GIC-400 (GICv2, no GICv3 sysreg interface): GICD 0x10101000 (disabled by s-boot, 512 lines, 8 CPUs), GICC 0x10102000 (enabled, pmr 0xF0).
+- PSCI v0.1 over smc: cpu_on 0xc4000003, cpu_off 0x84000002, cpu_suspend 0xc4000001. VERSION and SYSTEM_RESET unsupported.
+- CPU_ON targets are the DT reg values (0x1-0x5, 0x100, 0x101). Cores arrive with x0 = 0xBFFFF01C (no context id), so identify by MPIDR.
+  Real MPIDRs: 0x81000n00 for cores 1-5 (1-3 A55, 4-5 A75 midr 0x412FD0A1), 0x80000100/0x80000101 for the M4s (midr 0x531F0030).
+  Waking the second M4 hangs the primary core (seen in two runs).
+- SoC reset works: write 0 to PMU+0x404, then 1<<1 to PMU+0x3A00 (PMU base 0x15860000).
+- Display: framebuffer 0xCA000000, 1080x2280, stride 4320, 32 bpp. Command-mode panel: DECON_F (0x19030000) +0x70 bit 8 is the update trigger (+0x60 bit 31 shadow request alone does nothing). Scanout address registers at 0x19071040 and 0x19071840.
+- UFS HCI 0x13d60000: UFSHCI 3.0, 32 slots, 64-bit, left running by s-boot (hce=1).
+- Vol Up = GPA0_DAT (0x15850004) bit 3, active low (verified). Other pins unverified.
+- RAM: 0x80000000-0xbaafffff, 0xc0000000-0xdfffffff, 0xe1900000-0xffffffff, 0x880000000-0x97fffffff.
+- Flash: dd the image to /dev/block/by-name/boot from TWRP. Recover: Vol Down + Power 7 s, then Vol Up + Bixby + Power.
